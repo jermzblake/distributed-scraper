@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -88,6 +89,47 @@ func (q *Queue) SaveResult(ctx context.Context, doc ScrapedDoc) error {
 // QueueLength returns the number of pending URLs in the queue.
 func (q *Queue) QueueLength(ctx context.Context) (int64, error) {
 	return q.client.LLen(ctx, QueueKey).Result()
+}
+
+// ResultsCount returns the number of scraped documents stored in Redis.
+func (q *Queue) ResultsCount(ctx context.Context) (int64, error) {
+	return q.client.LLen(ctx, ResultsKey).Result()
+}
+
+// ExportResults reads all scraped documents from Redis and writes them as a
+// JSON array to w. Pass os.Stdout for w to stream to the terminal, or an
+// *os.File for file output. Writes "[]" when no results exist.
+func (q *Queue) ExportResults(ctx context.Context, w io.Writer) error {
+	items, err := q.client.LRange(ctx, ResultsKey, 0, -1).Result()
+	if err != nil {
+		return fmt.Errorf("failed to read results from Redis: %w", err)
+	}
+
+	docs := make([]ScrapedDoc, 0, len(items))
+	for i, item := range items {
+		var doc ScrapedDoc
+		if err := json.Unmarshal([]byte(item), &doc); err != nil {
+			return fmt.Errorf("failed to decode result %d: %w", i, err)
+		}
+		docs = append(docs, doc)
+	}
+
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(docs); err != nil {
+		return fmt.Errorf("failed to write JSON output: %w", err)
+	}
+	return nil
+}
+
+// Reset deletes both scraper:results and scraper:seen from Redis, allowing
+// the next crawl to start with a clean slate. Only call after a successful
+// ExportResults to avoid data loss.
+func (q *Queue) Reset(ctx context.Context) error {
+	if err := q.client.Del(ctx, ResultsKey, SeenKey).Err(); err != nil {
+		return fmt.Errorf("failed to reset Redis keys: %w", err)
+	}
+	return nil
 }
 
 // Close the underlying connection.
