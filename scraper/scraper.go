@@ -1,6 +1,7 @@
 package scraper
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -23,8 +24,10 @@ var httpClient = &http.Client{
 }
 
 // Fetch downloads a URL and parses its title, text content, and links.
-func Fetch(rawUrl string) (*Page, error) {
-	resp, err := httpClient.Get(rawUrl)
+func Fetch(ctx context.Context, rawUrl string) (*Page, error) {
+	req, _ := http.NewRequestWithContext(ctx, "GET", rawUrl, nil)
+
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("HTTP get %s error: %w", rawUrl, err)
 	}

@@ -94,7 +94,7 @@ func (w *Worker) processUrl(ctx context.Context, rawURL string) {
 	w.logger.Info("scraping", "url", rawURL)
 
 	// --- Fetch + Parse ---
-	page, err := scraper.Fetch(rawURL)
+	page, err := scraper.Fetch(ctx, rawURL)
 	if err != nil {
 		w.logger.Warn("Failed to fetch URL", "url", rawURL, "error", err)
 		return
