@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jermzblake/distributed-scraper/queue"
 	"github.com/jermzblake/distributed-scraper/worker"
 )
 
@@ -18,10 +19,19 @@ func main() {
 	id := flag.String("id", "worker-1", "Unique worker ID (e.g. worker-1)")
 	redisAddr := flag.String("redis", "localhost:6379", "Redis server address")
 	host := flag.String("host", "books.toscrape.com", "Only crawl URLs from this host (e.g. books.toscrape.com)")
+	export := flag.Bool("export", false, "Dump scraped results to JSON and exit")
+	out := flag.String("out", "results.json", "Output file for -export (use - for stdout)")
+	reset := flag.Bool("reset", false, "After -export, delete scraper:results and scraper:seen from Redis")
 	flag.Parse()
 
+	// In export mode, send logs to stderr so JSON written to stdout stays clean.
+	logDest := os.Stdout
+	if *export && *out == "-" {
+		logDest = os.Stderr
+	}
+
 	// Structured logging - each log line includes the worker ID
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+	logger := slog.New(slog.NewTextHandler(logDest, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	}))
 	slog.SetDefault(logger)
@@ -30,6 +40,67 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// --- Export mode: dump results from Redis and exit ---
+	if *export {
+		if *reset && !*export {
+			logger.Warn("-reset has no effect without -export")
+		}
+
+		q := queue.New(*redisAddr)
+		defer q.Close()
+
+		if err := q.Ping(ctx); err != nil {
+			logger.Error("Failed to connect to Redis", "error", err)
+			os.Exit(1)
+		}
+
+		count, err := q.ResultsCount(ctx)
+		if err != nil {
+			logger.Error("Failed to check results count", "error", err)
+			os.Exit(1)
+		}
+		if count == 0 {
+			logger.Info("No results to export — run a crawl first")
+			return
+		}
+
+		var w *os.File
+		if *out == "-" {
+			w = os.Stdout
+		} else {
+			var err error
+			w, err = os.Create(*out)
+			if err != nil {
+				logger.Error("Failed to create output file", "file", *out, "error", err)
+				os.Exit(1)
+			}
+			defer w.Close()
+		}
+
+		if err := q.ExportResults(ctx, w); err != nil {
+			logger.Error("Export failed", "error", err)
+			os.Exit(1)
+		}
+
+		if *out != "-" {
+			logger.Info("Results exported", "file", *out)
+		}
+
+		if *reset {
+			if err := q.Reset(ctx); err != nil {
+				logger.Error("Reset failed", "error", err)
+				os.Exit(1)
+			}
+			logger.Info("Redis keys cleared", "keys", []string{"scraper:results", "scraper:seen"})
+		}
+
+		return
+	}
+
+	if *reset {
+		logger.Warn("-reset has no effect without -export")
+	}
+
 	cfg := worker.Config{
 		ID: *id,
 		RedisAddr: *redisAddr,
@@ -37,14 +108,14 @@ func main() {
 		AllowedHost: *host,
 	}
 
-	w, err := worker.NewWorker(cfg)
+	wk, err := worker.NewWorker(cfg)
 	if err != nil {
 		logger.Error("Failed to create worker", "error", err)
 		os.Exit(1)
 	}
 
 	// Run is blocking - it exits when ctx is cancelled (e.g. on SIGINT/SIGTERM)
-	w.Run(ctx)
+	wk.Run(ctx)
 
 	logger.Info("Shutdown complete")
 }
