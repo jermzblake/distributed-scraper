@@ -63,8 +63,13 @@ func parse(rawUrl string, body []byte) (*Page, error) {
 	walk = func(n *html.Node) {
 		if n.Type == html.ElementNode {
 			switch n.Data {
-			case "script", "style", "head":
+			case "script", "style":
 				return // Skip non-content elements
+			case "title":
+				if n.FirstChild != nil && n.FirstChild.Type == html.TextNode {
+					page.Title = strings.TrimSpace(n.FirstChild.Data)
+				}
+				return // Title captured; don't add it to body content
 			case "a":
 				for _, attr := range n.Attr {
 					if attr.Key == "href" {
