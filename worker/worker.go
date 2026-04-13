@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/jermzblake/distributed-scraper/queue"
@@ -143,8 +145,14 @@ func (w *Worker) shouldFollow(link string) bool {
 }
 
 func ContainsHost(rawURL, host string) bool {
-	// fast path: avoid url.Parse overhead for every link
-	return len(rawURL) > len(host) &&
-		(rawURL[8:8+len(host)] == host || // https://
-			rawURL[7:7+len(host)] == host) // http:// 
+	if rawURL == "" || host == "" {
+		return false
+	}
+
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+
+	return strings.EqualFold(parsed.Hostname(), host)
 }
