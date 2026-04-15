@@ -11,9 +11,9 @@ import (
 )
 
 const (
-	QueueKey		= "scraper:queue"		// List - pending URLs
-	SeenKey			= "scraper:seen"		// Set - visited URLs (dedup)
-	ResultsKey	= "scraper:results"	// List - completed documents
+	QueueKey   = "scraper:queue"   // List - pending URLs
+	SeenKey    = "scraper:seen"    // Set - visited URLs (dedup)
+	ResultsKey = "scraper:results" // List - completed documents
 )
 
 // Queue wraps a Redis client with scraper-specific operations.
@@ -23,20 +23,20 @@ type Queue struct {
 
 // ScrapedDoc is what a worker produces after visiting a URL.
 type ScrapedDoc struct {
-	URL     	string   					`json:"url"`
-	Title   	string   					`json:"title"`
-	Content 	string   					`json:"content"`
-	Links   	[]string 					`json:"links"`
-	ScrapedAt time.Time 				`json:"scraped_at"`
-	WorkerID 	string 						`json:"worker_id"`
-	Metadata 	map[string]string `json:"metadata,omitempty"`
+	URL       string            `json:"url"`
+	Title     string            `json:"title"`
+	Content   string            `json:"content"`
+	Links     []string          `json:"links"`
+	ScrapedAt time.Time         `json:"scraped_at"`
+	WorkerID  string            `json:"worker_id"`
+	Metadata  map[string]string `json:"metadata,omitempty"`
 }
 
 func New(addr string) *Queue {
 	client := redis.NewClient(&redis.Options{
-		Addr: addr,
-		DialTimeout: 5 * time.Second,
-		ReadTimeout: 5 * time.Second,		// Must be > BRPOP timeout in worker
+		Addr:         addr,
+		DialTimeout:  5 * time.Second,
+		ReadTimeout:  5 * time.Second, // Must be > BRPOP timeout in worker
 		WriteTimeout: 5 * time.Second,
 	})
 	return &Queue{client: client}
@@ -45,6 +45,12 @@ func New(addr string) *Queue {
 // Ping verifies the Redis connection. Call this at startup.
 func (q *Queue) Ping(ctx context.Context) error {
 	return q.client.Ping(ctx).Err()
+}
+
+// Client exposes the underlying Redis client for internal integrations
+// that need low-level Redis primitives.
+func (q *Queue) Client() *redis.Client {
+	return q.client
 }
 
 // Push adds a URL to the work queue (left push = head of list).
