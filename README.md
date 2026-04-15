@@ -45,6 +45,26 @@ go run . --export --out results.json
 | `--out`    | `results.json`       | Output file for `--export` (use `-` for stdout) |
 | `--reset`  | `false`              | Clear Redis results and seen-set after export   |
 
+### Export Output Format
+
+Results export as a JSON array of `ScrapedDoc` objects. **Note:** Results appear in **reverse insertion order** (LIFO) — the most recently scraped pages appear first. Each document includes:
+
+```json
+[
+  {
+    "url": "https://example.com/page",
+    "title": "Page Title",
+    "content": "Extracted text content",
+    "links": ["https://example.com/link1", "https://example.com/link2"],
+    "scraped_at": "2026-04-15T12:34:56Z",
+    "worker_id": "worker-1",
+    "metadata": {
+      "description": "Meta description from the page"
+    }
+  }
+]
+```
+
 ## Running Tests
 
 ```bash
