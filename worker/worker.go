@@ -199,6 +199,9 @@ func (w *Worker) processUrl(ctx context.Context, rawURL string) error {
 		Links:     page.Links,
 		ScrapedAt: time.Now().UTC(),
 		WorkerID:  w.cfg.ID,
+		Metadata: map[string]string{
+			"description": page.Description,
+		},
 	}
 	if err := w.queue.SaveResult(ctx, doc); err != nil {
 		w.logger.Error("Failed to save scraped document", "url", rawURL, "error", err)
