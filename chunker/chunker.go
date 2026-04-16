@@ -29,6 +29,14 @@ func Split(text string, chunkSize, chunkOverlap int) []Chunk {
 	if chunkOverlap < 0 {
 		chunkOverlap = DefaultChunkOverlap
 	}
+	if chunkOverlap >= chunkSize {
+		chunkOverlap = chunkSize - 1
+	}
+
+	step := chunkSize - chunkOverlap
+	if step <= 0 {
+		step = 1
+	}
 
 	words := tokenize(text)
 	if len(words) == 0 {
@@ -38,7 +46,7 @@ func Split(text string, chunkSize, chunkOverlap int) []Chunk {
 	var chunks []Chunk
 	idx := 0
 
-	for start := 0; start < len(words); start += chunkSize - chunkOverlap {
+	for start := 0; start < len(words); start += step {
 		end := start + chunkSize
 		if end > len(words) {
 			end = len(words)
