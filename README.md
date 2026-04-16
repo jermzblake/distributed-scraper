@@ -114,6 +114,26 @@ Results export as a JSON array of `ScrapedDoc` objects. **Note:** Results appear
 ]
 ```
 
+## Troubleshooting
+
+- Qdrant connection errors (`connection refused`, `failed to connect to Qdrant`):
+  Ensure Qdrant is running and gRPC is exposed on port `6334`.
+
+  ```bash
+  docker compose up -d
+  ```
+
+- Ollama/model errors (`ollama not reachable`, `model not found`):
+  Ensure Ollama is running and pull the embedding model used by workers.
+
+  ```bash
+  ollama pull qwen3-embedding:0.6b
+  ```
+
+- Embedding dimension mismatch (`vector size` / collection dimension errors):
+  Keep `--dims` aligned with the selected model (for `qwen3-embedding:0.6b`, use `--dims 1024`).
+  If you changed dimensions in an existing setup, clear Qdrant data and re-index from scratch.
+
 ## Running Tests
 
 ```bash
