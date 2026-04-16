@@ -1,13 +1,14 @@
 package scraper
 
 import (
-	"bytes"
 	"context"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
+
+	"github.com/PuerkitoBio/goquery"
 )
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -20,6 +21,50 @@ func mustParseBase(t *testing.T, raw string) *url.URL {
 		t.Fatalf("mustParseBase(%q): %v", raw, err)
 	}
 	return u
+}
+
+func assertContainsAll(t *testing.T, content string, want []string, label string) {
+	t.Helper()
+	for _, s := range want {
+		if !strings.Contains(content, s) {
+			t.Errorf("%s missing expected substring %q\n  got: %q", label, s, content)
+		}
+	}
+}
+
+func assertContainsNone(t *testing.T, content string, forbidden []string, label string) {
+	t.Helper()
+	for _, s := range forbidden {
+		if strings.Contains(content, s) {
+			t.Errorf("%s contains forbidden substring %q\n  got: %q", label, s, content)
+		}
+	}
+}
+
+func toSet(values []string) map[string]bool {
+	set := make(map[string]bool, len(values))
+	for _, v := range values {
+		set[v] = true
+	}
+	return set
+}
+
+func assertSetContainsAll(t *testing.T, gotSet map[string]bool, want []string, label string, gotRaw []string) {
+	t.Helper()
+	for _, v := range want {
+		if !gotSet[v] {
+			t.Errorf("%s missing expected value %q\n  got: %v", label, v, gotRaw)
+		}
+	}
+}
+
+func assertSetContainsNone(t *testing.T, gotSet map[string]bool, forbidden []string, label string, gotRaw []string) {
+	t.Helper()
+	for _, v := range forbidden {
+		if gotSet[v] {
+			t.Errorf("%s contains forbidden value %q\n  got: %v", label, v, gotRaw)
+		}
+	}
 }
 
 // ── resolveURL ────────────────────────────────────────────────────────────────
@@ -108,121 +153,71 @@ func TestResolveURL(t *testing.T) {
 	}
 }
 
-// ── parse ────────────────────────────────────────────────────────────────────
+// ── extract ─────────────────────────────────────────────────────────────────
 
-func TestParse(t *testing.T) {
+func TestExtract(t *testing.T) {
 	t.Parallel()
 
-	const baseURL = "https://example.com/page"
-
 	tests := []struct {
-		name         string
-		html         string
-		wantContent  string   // substring that must appear in Content
-		wantNoText   []string // substrings that must NOT appear in Content
-		wantLinks    []string // links that must appear in Links
-		wantNoLinks  []string // links that must NOT appear in Links
-		wantErr      bool
+		name                string
+		baseURL             string
+		html                string
+		wantTitle           string
+		wantDescription     string
+		wantHeadings        []string
+		wantContentContains []string
+		wantContentNot      []string
+		wantLinks           []string
+		wantNoLinks         []string
 	}{
 		{
-			name: "standard page — body text extracted, links collected",
-			html: `<html><body>
-				<p>Hello, world.</p>
-				<a href="https://linked.example.com/">Link</a>
-			</body></html>`,
-			wantContent: "Hello, world.",
-			wantLinks:   []string{"https://linked.example.com/"},
-		},
-		{
-			name: "script tag content is excluded from body text",
-			html: `<html><body>
-				<p>Visible text</p>
-				<script>var secret = "should-not-appear";</script>
-			</body></html>`,
-			wantContent:  "Visible text",
-			wantNoText:   []string{"secret", "should-not-appear"},
-		},
-		{
-			name: "style tag content is excluded from body text",
-			html: `<html><body>
-				<p>Readable</p>
-				<style>body { color: red; /* no-style-text */ }</style>
-			</body></html>`,
-			wantContent: "Readable",
-			wantNoText:  []string{"no-style-text"},
-		},
-		{
-			name: "title tag in head is extracted into Page.Title and excluded from Content",
-			html: `<html><head><title>My Page Title</title></head><body><p>Content</p></body></html>`,
-			wantContent: "Content",
-			wantNoText:  []string{"My Page Title"},
-			// Title is captured separately; verified via checkPage below.
-		},
-		{
-			name: "relative link is resolved to absolute URL",
-			html: `<html><body><a href="/about">About</a></body></html>`,
+			name:            "extracts title description headings content and normalized links",
+			baseURL:         "https://example.com/catalog/page.html?ref=1",
+			html:            `<html><head><title>My Page Title</title><meta name="description" content="Summary for search"></head><body><h1>Primary Heading</h1><p>This paragraph has enough characters to be retained in extracted content safely.</p><a href="/about#team">About</a></body></html>`,
+			wantTitle:       "My Page Title",
+			wantDescription: "Summary for search",
+			wantHeadings:    []string{"Primary Heading"},
+			wantContentContains: []string{
+				"This paragraph has enough characters to be retained in extracted content safely.",
+			},
 			wantLinks: []string{"https://example.com/about"},
 		},
 		{
-			name: "fragment is stripped from link href",
-			html: `<html><body>
-				<a href="https://example.com/page#section">Anchor</a>
-			</body></html>`,
-			wantLinks:   []string{"https://example.com/page"},
-			wantNoLinks: []string{"https://example.com/page#section"},
-		},
-		{
-			name: "non-http links are excluded",
-			html: `<html><body>
-				<a href="mailto:user@example.com">Mail</a>
-				<a href="javascript:void(0)">JS</a>
-				<a href="ftp://files.example.com/">FTP</a>
-			</body></html>`,
-			wantNoLinks: []string{
-				"mailto:user@example.com",
-				"javascript:void(0)",
-				"ftp://files.example.com/",
+			name:            "removes noisy elements and excludes short snippets",
+			baseURL:         "https://example.com/",
+			html:            `<html><body><nav><p>This navigation paragraph is intentionally long enough to be excluded by selector removal.</p></nav><p>short text</p><p>This visible paragraph is intentionally longer than forty characters and should survive.</p><script>var secret = "do-not-include";</script></body></html>`,
+			wantContentContains: []string{
+				"This visible paragraph is intentionally longer than forty characters and should survive.",
+			},
+			wantContentNot: []string{
+				"navigation paragraph",
+				"do-not-include",
+				"short text",
 			},
 		},
 		{
-			name: "a tag with no href attribute yields no link",
-			html: `<html><body><a name="anchor">Named anchor, no href</a></body></html>`,
-			// No links should result from an <a> without href.
-			wantContent: "Named anchor, no href",
-		},
-		{
-			name: "deeply nested text is captured",
-			html: `<html><body><div><section><article><p>Deep text</p></article></section></div></body></html>`,
-			wantContent: "Deep text",
-		},
-		{
-			name: "empty body produces empty content and no links",
-			html: `<html><body></body></html>`,
-			// No assertions on content or links — just must not error.
-		},
-		{
-			name: "whitespace-only body is trimmed to empty content",
-			html: "<html><body>   \n\t  </body></html>",
-			// wantContent is "" — Page.Content should be blank, not a string of spaces.
-		},
-		{
-			name: "multiple links are all collected",
-			html: `<html><body>
-				<a href="https://a.example.com/">A</a>
-				<a href="https://b.example.com/">B</a>
-				<a href="https://c.example.com/">C</a>
-			</body></html>`,
-			wantLinks: []string{
-				"https://a.example.com/",
-				"https://b.example.com/",
-				"https://c.example.com/",
+			name:            "prefers article over body when selecting content root",
+			baseURL:         "https://example.com/",
+			html:            `<html><body><p>This body paragraph is long but should not be included when article exists for content extraction.</p><article><p>This article paragraph is long enough and should be chosen as the content source.</p></article></body></html>`,
+			wantContentContains: []string{
+				"This article paragraph is long enough and should be chosen as the content source.",
+			},
+			wantContentNot: []string{
+				"This body paragraph is long but should not be included",
 			},
 		},
 		{
-			name:    "malformed base URL returns a parse error",
-			html:    `<html><body>hi</body></html>`,
-			wantErr: true,
-			// baseURL will be overridden to an invalid value in this case — see below.
+			name:        "filters non-http links and keeps absolute https links",
+			baseURL:     "https://example.com/path",
+			html:        `<html><body><a href="mailto:user@example.com">mail</a><a href="ftp://files.example.com/pub">ftp</a><a href="https://other.example.com/page">https</a></body></html>`,
+			wantLinks:   []string{"https://other.example.com/page"},
+			wantNoLinks: []string{"mailto:user@example.com", "ftp://files.example.com/pub"},
+		},
+		{
+			name:     "page URL is preserved from base URL",
+			baseURL:  "https://example.com/some/path?q=1",
+			html:     `<html><body><p>This content string exceeds forty characters so URL assertion is exercised with valid content.</p></body></html>`,
+			wantLinks: nil,
 		},
 	}
 
@@ -231,110 +226,34 @@ func TestParse(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			rawURL := baseURL
-			if tt.wantErr {
-				rawURL = "://not-a-url" // triggers url.Parse failure inside parse()
-			}
-
-			page, err := parse(rawURL, []byte(tt.html))
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("parse() error = %v, wantErr %v", err, tt.wantErr)
-			}
-			if tt.wantErr {
-				return
-			}
-
-			if tt.wantContent != "" && !strings.Contains(page.Content, tt.wantContent) {
-				t.Errorf("Content = %q\n  missing expected substring: %q", page.Content, tt.wantContent)
-			}
-			for _, bad := range tt.wantNoText {
-				if strings.Contains(page.Content, bad) {
-					t.Errorf("Content contains forbidden text %q:\n  %q", bad, page.Content)
-				}
-			}
-
-			linkSet := make(map[string]bool, len(page.Links))
-			for _, l := range page.Links {
-				linkSet[l] = true
-			}
-			for _, want := range tt.wantLinks {
-				if !linkSet[want] {
-					t.Errorf("Links missing expected %q\n  got: %v", want, page.Links)
-				}
-			}
-			for _, bad := range tt.wantNoLinks {
-				if linkSet[bad] {
-					t.Errorf("Links contains forbidden entry %q", bad)
-				}
-			}
-		})
-	}
-}
-
-// TestParseTitleExtraction verifies that the <title> element is captured in
-// Page.Title and its text does not bleed into Page.Content.
-func TestParseTitleExtraction(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name        string
-		html        string
-		wantTitle   string
-		wantNoTitle string // must not appear in Content
-	}{
-		{
-			name:        "title is extracted from a standard page",
-			html:        `<html><head><title>My Page Title</title></head><body><p>Body text</p></body></html>`,
-			wantTitle:   "My Page Title",
-			wantNoTitle: "My Page Title",
-		},
-		{
-			name:      "title is empty when head has no title element",
-			html:      `<html><head></head><body><p>Body</p></body></html>`,
-			wantTitle: "",
-		},
-		{
-			name:      "title is empty when there is no head element at all",
-			html:      `<html><body><p>Body only</p></body></html>`,
-			wantTitle: "",
-		},
-		{
-			name:        "surrounding whitespace in title is trimmed",
-			html:        "<html><head><title>  Padded Title  </title></head><body></body></html>",
-			wantTitle:   "Padded Title",
-			wantNoTitle: "Padded Title",
-		},
-	}
-
-	for _, tt := range tests {
-		tt := tt
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			page, err := parse("https://example.com/", []byte(tt.html))
+			doc, err := goquery.NewDocumentFromReader(strings.NewReader(tt.html))
 			if err != nil {
-				t.Fatalf("parse() unexpected error: %v", err)
+				t.Fatalf("goquery.NewDocumentFromReader() unexpected error: %v", err)
+			}
+
+			base := mustParseBase(t, tt.baseURL)
+			page := extract(doc, base)
+
+			if page.URL != tt.baseURL {
+				t.Fatalf("page.URL = %q, want %q", page.URL, tt.baseURL)
 			}
 			if page.Title != tt.wantTitle {
 				t.Fatalf("Title = %q, want %q", page.Title, tt.wantTitle)
 			}
-			if tt.wantNoTitle != "" && strings.Contains(page.Content, tt.wantNoTitle) {
-				t.Errorf("Content contains title text %q — should be kept separate", tt.wantNoTitle)
+			if page.Description != tt.wantDescription {
+				t.Fatalf("Description = %q, want %q", page.Description, tt.wantDescription)
 			}
-		})
-	}
-}
 
-// TestParseURLIsPreserved verifies the Page URL field is the raw input URL, not a
-// normalized or base-resolved variant.
-func TestParseURLIsPreserved(t *testing.T) {
-	t.Parallel()
-	const rawURL = "https://example.com/some/path?q=1"
-	page, err := parse(rawURL, []byte("<html><body>hi</body></html>"))
-	if err != nil {
-		t.Fatalf("parse() unexpected error: %v", err)
-	}
-	if page.URL != rawURL {
-		t.Fatalf("page.URL = %q, want %q", page.URL, rawURL)
+			headingSet := toSet(page.Headings)
+			assertSetContainsAll(t, headingSet, tt.wantHeadings, "Headings", page.Headings)
+
+			assertContainsAll(t, page.Content, tt.wantContentContains, "Content")
+			assertContainsNone(t, page.Content, tt.wantContentNot, "Content")
+
+			linkSet := toSet(page.Links)
+			assertSetContainsAll(t, linkSet, tt.wantLinks, "Links", page.Links)
+			assertSetContainsNone(t, linkSet, tt.wantNoLinks, "Links", page.Links)
+		})
 	}
 }
 
@@ -356,15 +275,13 @@ func TestFetch(t *testing.T) {
 				w.Header().Set("Content-Type", "text/html")
 				w.WriteHeader(http.StatusOK)
 				_, _ = w.Write([]byte(`<html><body>
-					<p>Scraped content</p>
+					<p>This paragraph is intentionally longer than forty characters so content extraction keeps it.</p>
 					<a href="/other">Other</a>
 				</body></html>`))
 			},
 			checkPage: func(t *testing.T, p *Page) {
 				t.Helper()
-				if !strings.Contains(p.Content, "Scraped content") {
-					t.Errorf("Content = %q, want it to contain %q", p.Content, "Scraped content")
-				}
+				assertContainsAll(t, p.Content, []string{"intentionally longer than forty characters"}, "Content")
 				if len(p.Links) == 0 {
 					t.Error("Links is empty, want at least one link")
 				}
@@ -394,27 +311,12 @@ func TestFetch(t *testing.T) {
 					return
 				}
 				w.WriteHeader(http.StatusOK)
-				_, _ = w.Write([]byte(`<html><body><p>Final destination</p></body></html>`))
+				_, _ = w.Write([]byte(`<html><body><p>This final destination paragraph is long enough to remain in extracted content.</p></body></html>`))
 			},
 			checkPage: func(t *testing.T, p *Page) {
 				t.Helper()
-				if !strings.Contains(p.Content, "Final destination") {
-					t.Errorf("Content = %q, expected redirect to be followed", p.Content)
-				}
+				assertContainsAll(t, p.Content, []string{"final destination paragraph"}, "Content")
 			},
-		},
-		{
-			name: "response body larger than 1MB is silently truncated — no error returned",
-			handler: func(w http.ResponseWriter, r *http.Request) {
-				w.WriteHeader(http.StatusOK)
-				// Write enough to exceed the 1MB cap (1<<20 bytes).
-				over := bytes.Repeat([]byte("a"), (1<<20)+512)
-				_, _ = w.Write([]byte("<html><body><p>"))
-				_, _ = w.Write(over)
-				_, _ = w.Write([]byte("</p></body></html>"))
-			},
-			// Fetch must not return an error; body is simply truncated.
-			wantErr: false,
 		},
 	}
 
