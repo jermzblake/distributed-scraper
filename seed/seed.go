@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/jermzblake/distributed-scraper/queue"
+	"distributed-scraper/queue"
 )
 
 func main() {

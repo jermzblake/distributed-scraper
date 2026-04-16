@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
-	"github.com/jermzblake/distributed-scraper/queue"
+	"distributed-scraper/queue"
 )
 
 // newTestQueue spins up an in-memory Redis and returns a Queue pointed at it.

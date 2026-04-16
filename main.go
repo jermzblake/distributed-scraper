@@ -9,8 +9,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jermzblake/distributed-scraper/queue"
-	"github.com/jermzblake/distributed-scraper/worker"
+	"distributed-scraper/embedder"
+	"distributed-scraper/queue"
+	"distributed-scraper/worker"
 )
 
 func main() {
@@ -18,7 +19,13 @@ func main() {
 	// from separate terminal windows, or even on separate machines without recompiling.
 	id := flag.String("id", "worker-1", "Unique worker ID (e.g. worker-1)")
 	redisAddr := flag.String("redis", "localhost:6379", "Redis server address")
+	qdrantAddr := flag.String("qdrant", "localhost:6334", "Qdrant gRPC address")
 	host := flag.String("host", "books.toscrape.com", "Only crawl URLs from this host (e.g. books.toscrape.com)")
+	ratePerSec := flag.Float64("rate", 2.0, "requests per second per domain")
+	rateBurst := flag.Int("burst", 5, "max burst requests")
+	ollamaAddr := flag.String("ollama", "http://localhost:11434", "ollama address (e.g. http://localhost:11434)")
+	model := flag.String("model", embedder.ModelQwen3_0_6B, "ollama embedding model")
+	dims := flag.Uint64("dims", embedder.DefaultDimension, "embedding dimension")
 	export := flag.Bool("export", false, "Dump scraped results to JSON and exit")
 	out := flag.String("out", "results.json", "Output file for -export (use - for stdout)")
 	reset := flag.Bool("reset", false, "After -export, delete scraper:results and scraper:seen from Redis")
@@ -41,11 +48,10 @@ func main() {
 	defer stop()
 
 	// --- Export mode: dump results from Redis and exit ---
+	if *reset && !*export {
+		logger.Warn("-reset has no effect without -export")
+	}
 	if *export {
-		if *reset && !*export {
-			logger.Warn("-reset has no effect without -export")
-		}
-
 		q := queue.New(*redisAddr)
 		defer q.Close()
 
@@ -102,10 +108,18 @@ func main() {
 	}
 
 	cfg := worker.Config{
-		ID: *id,
-		RedisAddr: *redisAddr,
-		PopTimeout: 5 * time.Second,	// Short timeout to check for shutdown signals
-		AllowedHost: *host,
+		ID:             *id,
+		RedisAddr:      *redisAddr,
+		PopTimeout:     5 * time.Second, // Short timeout to check for shutdown signals
+		QdrantAddr:     *qdrantAddr,
+		AllowedHost:    *host,
+		RatePerSecond:  *ratePerSec,
+		RateBurst:      *rateBurst,
+		ChunkSize:      400,
+		ChunkOverlap:   50,
+		OllamaAddr:     *ollamaAddr,
+		EmbedModel:     *model,
+		EmbedDimension: *dims,
 	}
 
 	wk, err := worker.NewWorker(cfg)

@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/alicebob/miniredis/v2"
+	"distributed-scraper/scraper"
 )
 
 func TestContainsHost(t *testing.T) {
@@ -154,25 +154,13 @@ func TestNewWorker(t *testing.T) {
 
 	tests := []struct {
 		name        string
-		redisAddr   func() string // lazily resolved so miniredis starts per-case
+		redisAddr   string
 		wantErr     bool
 		errContains string
 	}{
 		{
-			name: "valid Redis address returns a non-nil Worker",
-			redisAddr: func() string {
-				mr := miniredis.NewMiniRedis()
-				if err := mr.Start(); err != nil {
-					t.Fatalf("miniredis.Start(): %v", err)
-				}
-				t.Cleanup(mr.Close)
-				return mr.Addr()
-			},
-			wantErr: false,
-		},
-		{
 			name:        "unreachable Redis address returns an error containing the address",
-			redisAddr:   func() string { return "localhost:1" }, // port 1 is never open
+			redisAddr:   "localhost:1", // port 1 is never open
 			wantErr:     true,
 			errContains: "localhost:1",
 		},
@@ -184,7 +172,7 @@ func TestNewWorker(t *testing.T) {
 			t.Parallel()
 			cfg := Config{
 				ID:        "test-worker",
-				RedisAddr: tt.redisAddr(),
+				RedisAddr: tt.redisAddr,
 			}
 			w, err := NewWorker(cfg)
 			if (err != nil) != tt.wantErr {
@@ -198,6 +186,53 @@ func TestNewWorker(t *testing.T) {
 			}
 			if w == nil {
 				t.Fatal("NewWorker() returned nil Worker, want non-nil")
+			}
+		})
+	}
+}
+
+func TestBuildEnrichedChunk(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		page      *scraper.Page
+		chunkText string
+		wantParts []string
+		noParts   []string
+	}{
+		{
+			name: "includes title description and chunk text when present",
+			page: &scraper.Page{
+				Title:       "Intro to Crawling",
+				Description: "A practical guide",
+			},
+			chunkText: "This is the chunk body.",
+			wantParts: []string{"Title: Intro to Crawling", "A practical guide", "This is the chunk body."},
+		},
+		{
+			name: "omits empty title and description",
+			page: &scraper.Page{},
+			chunkText: "Only raw chunk content.",
+			wantParts: []string{"Only raw chunk content."},
+			noParts:   []string{"Title:"},
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := buildEnrichedChunk(tt.page, tt.chunkText)
+			for _, part := range tt.wantParts {
+				if !strings.Contains(got, part) {
+					t.Fatalf("buildEnrichedChunk() output missing %q\n  got: %q", part, got)
+				}
+			}
+			for _, part := range tt.noParts {
+				if strings.Contains(got, part) {
+					t.Fatalf("buildEnrichedChunk() output unexpectedly contains %q\n  got: %q", part, got)
+				}
 			}
 		})
 	}

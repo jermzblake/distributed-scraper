@@ -3,19 +3,22 @@ package scraper
 import (
 	"context"
 	"fmt"
-	"io"
+
+	// "io"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
-	"golang.org/x/net/html"
+	"github.com/PuerkitoBio/goquery"
 )
 
 type Page struct {
 	URL string
 	Title string
-	Content string
+	Description string 	// meta description — great for vector metadata
+	Headings    []string	
+	Content string			// clean body text only
 	Links []string
 }
 
@@ -25,7 +28,11 @@ var httpClient = &http.Client{
 
 // Fetch downloads a URL and parses its title, text content, and links.
 func Fetch(ctx context.Context, rawUrl string) (*Page, error) {
-	req, _ := http.NewRequestWithContext(ctx, "GET", rawUrl, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawUrl, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; go-scraper/1.0)")
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
@@ -37,64 +44,83 @@ func Fetch(ctx context.Context, rawUrl string) (*Page, error) {
 		return nil, fmt.Errorf("HTTP get %s returned status %d", rawUrl, resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))	// Limit to 1MB
+	// goquery.NewDocumentFromReader parses HTML from any io.Reader.
+	// It handles malformed HTML gracefully (same as a browser would).
+	doc, err := goquery.NewDocumentFromReader(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("read body error: %w", err)
+		return nil, fmt.Errorf("parse html: %w", err)
 	}
 
-	return parse(rawUrl, body)
+	base, _ := url.Parse(rawUrl)
+	return extract(doc, base), nil
 }
 
-func parse(rawUrl string, body []byte) (*Page, error) {
-	base, err := url.Parse(rawUrl)
-	if err != nil {
-		return nil, fmt.Errorf("parse URL error: %w", err)
+func extract(doc *goquery.Document, base *url.URL) *Page {
+	page := &Page{URL: base.String()}
+	page.Title = strings.TrimSpace(doc.Find("title").First().Text())
+	// The meta description is often the best single-sentence summary of a page.
+	// Including it as metadata in Qdrant lets you display it in search results.
+	page.Description, _ = doc.Find("meta[name='description']").Attr("content")
+
+	doc.Find("h1, h2, h3").Each(func(_ int, s *goquery.Selection) {
+		if text := strings.TrimSpace(s.Text()); text != "" {
+			page.Headings = append(page.Headings, text)
+		}
+	})
+
+	// First pass: remove universally noisy elements	
+	doc.Find(`
+    script, style, nav, footer, header, aside,
+    form, button, input, select,
+    .cookie-banner, #cookie-notice,
+    [aria-hidden="true"]
+	`).Remove()
+
+	// Second pass: remove site-specific noise.
+	// These selectors are specific to books.toscrape.com but the pattern
+	// applies everywhere — you'll add site-specific rules as you encounter them.
+	doc.Find(`
+    .sidebar,
+    .side_categories,
+    .promotions,
+    .alert,
+    .breadcrumb
+	`).Remove()
+
+	// Prefer semantic content containers; fall back to body.
+	var contentSel *goquery.Selection
+	for _, selector := range []string{"article", "main", "[role='main']", ".content", "#content", "body"} {
+		if sel := doc.Find(selector); sel.Length() > 0 {
+			contentSel = sel.First()
+			break
+		}
 	}
 
-	doc, err := html.Parse(strings.NewReader(string(body)))
-	if err != nil {
-		return nil, fmt.Errorf("HTML parse error: %w", err)
-	}
-
-	page := &Page{URL: rawUrl}
-	var sb strings.Builder
-
-	var walk func(*html.Node)
-	walk = func(n *html.Node) {
-		if n.Type == html.ElementNode {
-			switch n.Data {
-			case "script", "style":
-				return // Skip non-content elements
-			case "title":
-				if n.FirstChild != nil && n.FirstChild.Type == html.TextNode {
-					page.Title = strings.TrimSpace(n.FirstChild.Data)
-				}
-				return // Title captured; don't add it to body content
-			case "a":
-				for _, attr := range n.Attr {
-					if attr.Key == "href" {
-						if resolved := resolveURL(base, attr.Val); resolved != "" {
-							page.Links = append(page.Links, resolved)
-						}
-					}
+	if contentSel != nil {
+		var parts []string
+		// Extract paragraph and heading text with spacing between them.
+		// This produces more natural text than concatenating all TextNodes.
+		contentSel.Find("p, h1, h2, h3, h4, li").Each(func(_ int, s *goquery.Selection) {
+			if text := strings.TrimSpace(s.Text()); text != "" {
+				// Additional guard: skip very short strings — they're usually
+				// button labels, price strings, or single-word nav items.
+				if len(text) > 40 {
+						parts = append(parts, text)
 				}
 			}
-		}
-		if n.Type == html.TextNode {
-			text := strings.TrimSpace(n.Data)
-			if text != "" {
-				sb.WriteString(text)
-				sb.WriteByte(' ')
-			}
-		}
-		for c := n.FirstChild; c != nil; c = c.NextSibling {
-			walk(c)
-		}
+		})
+		page.Content = strings.Join(parts, "\n\n")
 	}
-	walk(doc)
 
-	page.Content = strings.TrimSpace(sb.String())
-	return page, nil
+	doc.Find("a[href]").Each(func(_ int, s *goquery.Selection) {
+		href, _ := s.Attr("href")
+		if resolved := resolveURL(base, href); resolved != "" {
+			page.Links = append(page.Links, resolved)
+		}
+	})
+
+	return page
+
 }
 
 // resolveURL resolves a possibly relative URL against the base URL and returns an absolute URL string.
